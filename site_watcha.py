@@ -165,6 +165,7 @@ class SiteWatcha(object):
                 headers=cls.default_headers,
                 proxy_url=cls._proxy_url,
                 cookies=cls._watcha_cookie,
+                timeout=30,
             ).json()
             return data
         except:
@@ -445,3 +446,4 @@ class SiteWatchaTv(SiteWatcha):
 
 class SiteWatchaKTv(SiteWatchaTv):
     module_char = 'K'
+
