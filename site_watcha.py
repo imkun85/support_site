@@ -54,6 +54,8 @@ class SiteWatcha(object):
         try:
             url = 'https://pedia.watcha.com/api/searches?query=%s' % keyword
             data = cls.get_json(url)
+            if data is None or data.get('result') is None:
+                return None
             if content_type == 'movies':
                 return data['result']['movies']
             elif content_type == 'tv_seasons':
