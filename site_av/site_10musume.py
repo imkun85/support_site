@@ -86,11 +86,11 @@ class Site10Musume(SiteAvBase):
 
 
     @classmethod
-    def info(cls, code, fp_meta_mode=False):
+    def info(cls, code, fp_meta_mode=False, skip_trans=False):
         ret = {}
         entity_result_val_final = None
         try:
-            entity_result_val_final = cls.__info(code, fp_meta_mode=fp_meta_mode).as_dict()
+            entity_result_val_final = cls.__info(code, fp_meta_mode=fp_meta_mode, skip_trans=skip_trans).as_dict()
             if entity_result_val_final:
                 ret['ret'] = 'success'
                 ret['data'] = entity_result_val_final
@@ -105,7 +105,7 @@ class Site10Musume(SiteAvBase):
 
 
     @classmethod
-    def __info(cls, code, fp_meta_mode=False):
+    def __info(cls, code, fp_meta_mode=False, skip_trans=False):
         code_part = code[2:]
         json_data = None
 
@@ -308,7 +308,10 @@ class Site10Musume(SiteAvBase):
         raw_tagline = json_data.get('Title', '')
         original_tagline = cls.A_P(raw_tagline)
         entity.original['tagline'] = original_tagline
-        entity.tagline = cls.trans_by_llm(original_tagline)
+        if skip_trans:
+            entity.tagline = original_tagline
+        else:
+            entity.tagline = cls.trans_by_llm(original_tagline)
 
         actresses = json_data.get('ActressesJa', [])
         if isinstance(actresses, list):
@@ -332,7 +335,10 @@ class Site10Musume(SiteAvBase):
         raw_plot = json_data.get('Desc', '')
         original_plot = cls.A_P(raw_plot)
         entity.original['plot'] = original_plot
-        entity.plot = cls.trans_by_llm(original_plot)
+        if skip_trans:
+            entity.plot = original_plot
+        else:
+            entity.plot = cls.trans_by_llm(original_plot)
 
         entity.studio = '10Musume'
         entity.original['studio'] = '10Musume'
@@ -356,5 +362,12 @@ class Site10Musume(SiteAvBase):
                             entity.extras.append(EntityExtra('trailer', trailer_title, 'mp4', video_url))
             except Exception as e:
                 logger.error(f"[{cls.site_name}] Trailer processing error: {e}")
+
+        used_model = getattr(cls, '_last_used_llm_model', None)
+        if used_model:
+            entity.extra_info['ai_translator'] = f"Ollama ({used_model})"
+            cls._last_used_llm_model = None
+        else:
+            entity.extra_info['ai_translator'] = "Default (FF)"
 
         return entity

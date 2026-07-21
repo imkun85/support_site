@@ -99,11 +99,11 @@ class SiteHeyzo(SiteAvBase):
 
 
     @classmethod
-    def info(cls, code, fp_meta_mode=False):
+    def info(cls, code, fp_meta_mode=False, skip_trans=False):
         ret = {}
         entity_result_val_final = None
         try:
-            entity_result_val_final = cls.__info(code, fp_meta_mode=fp_meta_mode).as_dict()
+            entity_result_val_final = cls.__info(code, fp_meta_mode=fp_meta_mode, skip_trans=skip_trans).as_dict()
             if entity_result_val_final:
                 ret['ret'] = 'success'
                 ret['data'] = entity_result_val_final
@@ -118,7 +118,7 @@ class SiteHeyzo(SiteAvBase):
 
 
     @classmethod
-    def __info(cls, code, fp_meta_mode=False):
+    def __info(cls, code, fp_meta_mode=False, skip_trans=False):
         code_part = code[2:]
         tmp = {}
         json_data = None
@@ -234,8 +234,13 @@ class SiteHeyzo(SiteAvBase):
         entity.title = entity.originaltitle = entity.sorttitle = entity.ui_code.upper()
         entity.label = "HEYZO"
 
-        entity.original['tagline'] = tmp.get('title', '')
-        entity.tagline = cls.trans_by_llm(tmp.get('title', ''))
+        cleaned_title = tmp.get('title', '')
+        entity.original['title'] = cleaned_title
+        entity.original['tagline'] = cleaned_title
+        if skip_trans:
+            entity.tagline = cleaned_title
+        else:
+            entity.tagline = cls.trans_by_llm(cleaned_title)
         entity.premiered = tmp.get('premiered')
         entity.year = tmp.get('year')
         
@@ -347,7 +352,10 @@ class SiteHeyzo(SiteAvBase):
         raw_plot = tmp.get('plot', '')
         if raw_plot:
             entity.original['plot'] = raw_plot
-            entity.plot = cls.trans_by_llm(raw_plot)
+            if skip_trans:
+                entity.plot = raw_plot
+            else:
+                entity.plot = cls.trans_by_llm(raw_plot)
         else:
             entity.plot = ''
 
@@ -363,5 +371,12 @@ class SiteHeyzo(SiteAvBase):
                     entity.extras.append(EntityExtra('trailer', trailer_title, 'mp4', video_url))
             except Exception as e:
                 logger.error(f"[{cls.site_name}] Trailer processing error: {e}")
+
+        used_model = getattr(cls, '_last_used_llm_model', None)
+        if used_model:
+            entity.extra_info['ai_translator'] = f"Ollama ({used_model})"
+            cls._last_used_llm_model = None
+        else:
+            entity.extra_info['ai_translator'] = "Default (FF)"
 
         return entity

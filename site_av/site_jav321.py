@@ -57,6 +57,10 @@ class SiteJav321(SiteAvBase):
             logger.debug(f"Jav321 Search: No direct match or multiple results for keyword '{keyword_for_url}'. Final URL: {res.url}")
             return []
 
+        if not res.text or not res.text.strip():
+            logger.debug(f"Jav321 Search: Empty HTML response for keyword '{keyword_for_url}'. Assuming no match.")
+            return []
+
         ret = []
         try:
             item = EntityAVSearch(cls.site_name)
@@ -355,18 +359,35 @@ class SiteJav321(SiteAvBase):
                     logger.exception(f"Jav321: Shiroutoname error: {e_shirouto}")
 
             try:
-                title_to_check = entity.original.get('tagline', entity.tagline or "")
+                if getattr(entity, 'genre', None) is None:
+                    entity.genre = []
+                if 'genre' not in entity.original or entity.original['genre'] is None:
+                    entity.original['genre'] = []
+
+                title_to_check = str(entity.original.get('tagline') or entity.tagline or "")
+                
                 if re.search(r'[\[【]\s*VR\s*[\]】]', title_to_check, re.IGNORECASE):
                     logger.debug(f"[{cls.site_name}] VR keyword detected in title. Setting content_type to 'vr'.")
+                    
+                    entity.content_type = 'vr'
+                    
                     vr_genre_original = "VR"
-                    if vr_genre_original not in entity.original.get('genre', []):
-                        if 'genre' not in entity.original: entity.original['genre'] = []
+                    if vr_genre_original not in entity.original['genre']:
                         entity.original['genre'].append(vr_genre_original)
+                        
                     vr_genre_translated = "VR"
                     if vr_genre_translated not in entity.genre:
                         entity.genre.append(vr_genre_translated)
+                        
             except Exception as e_vr_check:
                 logger.error(f"[{cls.site_name}] Error during VR check: {e_vr_check}")
+
+            used_model = getattr(cls, '_last_used_llm_model', None)
+            if used_model:
+                entity.extra_info['ai_translator'] = f"Ollama ({used_model})"
+                cls._last_used_llm_model = None
+            else:
+                entity.extra_info['ai_translator'] = "Default (FF)"
 
             logger.debug(f"Jav321: __info finished for {code}. UI Code: {ui_code_for_image}")
             return entity

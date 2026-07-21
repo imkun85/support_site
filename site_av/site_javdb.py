@@ -114,8 +114,8 @@ class SiteJavdb(SiteAvBase):
                     if cls.config.get('use_proxy'):
                         item.image_url = cls.make_image_url(item.image_url)
                     item.title_ko = "(현재 인터페이스에서는 번역을 제공하지 않습니다) " + item.title
-                else: 
-                    item.title_ko = cls.trans_by_llm(item.title)
+                else:
+                    item.title_ko = cls.trans(item.title)
 
                 item_dict = item.as_dict()
                 item_dict['is_priority_label_site'] = False 
@@ -226,8 +226,12 @@ class SiteJavdb(SiteAvBase):
                     actual_raw_title_text = current_title_node[0].strip()
 
         if actual_raw_title_text and actual_raw_title_text != entity.ui_code:
-            entity.original['tagline'] = cls.A_P(actual_raw_title_text)
-            entity.tagline = cls.trans_by_llm(cls.A_P(actual_raw_title_text))
+            cleaned_tagline = cls.A_P(actual_raw_title_text)
+            entity.original['tagline'] = cleaned_tagline
+            if skip_trans:
+                entity.tagline = cleaned_tagline
+            else:
+                entity.tagline = cls.trans_by_llm(cleaned_tagline)
         else: 
             entity.tagline = entity.ui_code
 
@@ -325,18 +329,33 @@ class SiteJavdb(SiteAvBase):
                 logger.exception(f"JavDB Info: Shiroutoname error: {e_shirouto}")
 
         try:
-            title_to_check = entity.original.get('tagline', entity.tagline or "")
+            if getattr(entity, 'genre', None) is None:
+                entity.genre = []
+            if 'genre' not in entity.original or entity.original['genre'] is None:
+                entity.original['genre'] = []
+
+            title_to_check = str(entity.original.get('tagline') or getattr(entity, 'tagline', '') or "")
+            
             if re.search(r'[\[【]\s*VR\s*[\]】]', title_to_check, re.IGNORECASE):
-                logger.debug(f"[{cls.site_name}] VR keyword detected in title. Setting content_type to 'vr'.")
+                entity.content_type = 'vr'
+                
                 vr_genre_original = "VR"
-                if vr_genre_original not in entity.original.get('genre', []):
-                    if 'genre' not in entity.original: entity.original['genre'] = []
+                if vr_genre_original not in entity.original['genre']:
                     entity.original['genre'].append(vr_genre_original)
+                    
                 vr_genre_translated = "VR"
                 if vr_genre_translated not in entity.genre:
                     entity.genre.append(vr_genre_translated)
+                    
         except Exception as e_vr_check:
             logger.error(f"[{cls.site_name}] Error during VR check: {e_vr_check}")
+
+        used_model = getattr(cls, '_last_used_llm_model', None)
+        if used_model:
+            entity.extra_info['ai_translator'] = f"Ollama ({used_model})"
+            cls._last_used_llm_model = None
+        else:
+            entity.extra_info['ai_translator'] = "Default (FF)"
 
         logger.debug(f"JavDB: __info finished for {code}. UI Code: {entity.ui_code}")
         return entity

@@ -102,11 +102,11 @@ class SitePaco(SiteAvBase):
 
 
     @classmethod
-    def info(cls, code, fp_meta_mode=False):
+    def info(cls, code, fp_meta_mode=False, skip_trans=False):
         ret = {}
         entity_result_val_final = None
         try:
-            entity_result_val_final = cls.__info(code, fp_meta_mode=fp_meta_mode).as_dict()
+            entity_result_val_final = cls.__info(code, fp_meta_mode=fp_meta_mode, skip_trans=skip_trans).as_dict()
             if entity_result_val_final:
                 ret["ret"] = "success"
                 ret["data"] = entity_result_val_final
@@ -121,7 +121,7 @@ class SitePaco(SiteAvBase):
 
 
     @classmethod
-    def __info(cls, code, fp_meta_mode=False):
+    def __info(cls, code, fp_meta_mode=False, skip_trans=False):
         code_part = code[2:]
         json_data = None
 
@@ -158,8 +158,13 @@ class SitePaco(SiteAvBase):
 
         raw_title = json_data.get('Title', '')
         if raw_title:
-            entity.original['tagline'] = cls.A_P(raw_title)
-            entity.tagline = cls.trans_by_llm(entity.original['tagline'])
+            cleaned_title = cls.A_P(raw_title)
+            entity.original['title'] = cleaned_title
+            entity.original['tagline'] = cleaned_title
+            if skip_trans:
+                entity.tagline = cleaned_title
+            else:
+                entity.tagline = cls.trans_by_llm(entity.original['tagline'])
 
         if json_data.get('Series'):
             entity.original['series'] = json_data['Series']
@@ -169,7 +174,10 @@ class SitePaco(SiteAvBase):
         
         if json_data.get('Desc'):
             entity.original['plot'] = json_data['Desc']
-            entity.plot = cls.trans_by_llm(entity.original['plot'])
+            if skip_trans:
+                entity.plot = entity.original['plot']
+            else:
+                entity.plot = cls.trans_by_llm(entity.original['plot'])
 
         if json_data.get('Duration'):
             entity.runtime = int(json_data['Duration']) // 60
@@ -365,6 +373,13 @@ class SitePaco(SiteAvBase):
         if json_data.get('AvgRating'):
             try: entity.ratings.append(EntityRatings(float(json_data['AvgRating']), max=5, name=cls.site_name))
             except: pass
+
+        used_model = getattr(cls, '_last_used_llm_model', None)
+        if used_model:
+            entity.extra_info['ai_translator'] = f"Ollama ({used_model})"
+            cls._last_used_llm_model = None
+        else:
+            entity.extra_info['ai_translator'] = "Default (FF)"
 
         return entity
 

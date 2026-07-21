@@ -375,16 +375,16 @@ class SiteTpdb(SiteAvBase):
         return {'ret': 'success', 'data': ret[:15]}
 
     @classmethod
-    def info(cls, code, fp_meta_mode=False):
+    def info(cls, code, fp_meta_mode=False, skip_trans=False):
         try:
-            entity = cls.__info(code, fp_meta_mode)
+            entity = cls.__info(code, fp_meta_mode=fp_meta_mode, skip_trans=skip_trans)
             return {'ret': 'success', 'data': entity.as_dict()} if entity else {'ret': 'error'}
         except Exception as e:
             logger.exception(f"[{cls.site_name}] Info Exception: {e}")
             return {'ret': 'exception', 'data': str(e)}
 
     @classmethod
-    def __info(cls, code, fp_meta_mode=False):
+    def __info(cls, code, fp_meta_mode=False, skip_trans=False):
         if len(code) < 5 or code[3] != '_':
             logger.error(f"[{cls.site_name}] Invalid code format: {code}")
             return None
@@ -445,8 +445,12 @@ class SiteTpdb(SiteAvBase):
 
         plot_text = item_data.get('description', '')
         if plot_text:
-            entity.original['plot'] = cls.A_P(str(plot_text))
-            entity.plot = cls.trans_by_llm(entity.original['plot'])
+            cleaned_plot = cls.A_P(str(plot_text))
+            entity.original['plot'] = cleaned_plot
+            if skip_trans:
+                entity.plot = cleaned_plot
+            else:
+                entity.plot = cls.trans_by_llm(entity.original['plot'])
 
         # 배우 필터링
         females, males = [], []
@@ -587,4 +591,12 @@ class SiteTpdb(SiteAvBase):
                     entity.extras.append(EntityExtra("trailer", entity.title, "mp4", trailer_url))
             except Exception as e_trailer:
                 logger.error(f"[{cls.site_name}] Error adding trailer: {e_trailer}")
+
+        used_model = getattr(cls, '_last_used_llm_model', None)
+        if used_model:
+            entity.extra_info['ai_translator'] = f"Ollama ({used_model})"
+            cls._last_used_llm_model = None
+        else:
+            entity.extra_info['ai_translator'] = "Default (FF)"
+
         return entity
