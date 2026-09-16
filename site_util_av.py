@@ -238,10 +238,10 @@ class SiteUtilAv:
             logger.warning(f"save_image_to_server_path: 이미지 열기/로드 실패: {log_source_info}")
             return None
 
-        try:
-            # 3. 실제 처리 대상 이미지 준비 (초기에는 원본과 동일)
-            im_to_process = im_opened_original
+        # 3. 실제 처리 대상 이미지 준비 (초기에는 원본과 동일)
+        im_to_process = im_opened_original
 
+        try:
             # 4. 레터박스 제거 (image_type='p' 또는 'ps' 이고 crop_mode가 있을 때, 4:3 비율이면 시도)
             # 원본 코드에서는 image_type == 'p' 조건만 있었으나, 'ps'도 포스터이므로 포함 고려. 여기서는 원본 유지.
             if image_type == 'p' and crop_mode:
@@ -935,7 +935,7 @@ class SiteUtilAv:
             # 계산된 너비가 원본 너비보다 크면, 크롭이 의미 없으므로 원본 반환
             # 또는 너비를 원본 너비에 맞추고 높이를 조정할 수도 있으나, 현재는 원본 반환이 안전
             # logger.debug(f"imcrop: Calculated new_w ({new_w}) > original width ({width}). Returning original.")
-            return im
+            return im.copy()
 
         if position == "l":
             left = 0

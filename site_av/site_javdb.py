@@ -7,6 +7,7 @@ from ..entity_av import EntityAVSearch
 from ..entity_base import EntityMovie, EntityActor, EntityThumb, EntityExtra, EntityRatings
 from ..setup import P, logger
 from .site_av_base import SiteAvBase
+from ..constants import AV_STUDIO, AV_GENRE_IGNORE_JA, AV_GENRE, AV_GENRE_IGNORE_KO
 
 SITE_BASE_URL = 'https://javdb.com'
 
@@ -16,6 +17,24 @@ class SiteJavdb(SiteAvBase):
     module_char = 'C'
     default_headers = SiteAvBase.base_default_headers.copy()
     default_headers.update({"Referer": SITE_BASE_URL + "/"})
+
+
+    @classmethod
+    def _check_ip_block(cls, tree):
+        """JavDB의 IP 차단 페이지(비정상 행위 감지) 여부를 확인합니다."""
+        if tree is None:
+            return False
+        try:
+            # 1. 텍스트 전체에서 차단 키워드 검사
+            text_content = tree.text_content()
+            if "基於你的異常行為" in text_content or "管理員禁止了你的訪問" in text_content:
+                return True
+            # 2. 특정 차단 알림 태그 검사
+            if tree.xpath('//*[contains(text(), "基於你的異常行為") or contains(text(), "管理員禁止了你的訪問")]'):
+                return True
+        except Exception as e:
+            logger.debug(f"[{cls.site_name}] _check_ip_block error: {e}")
+        return False
 
 
     ################################################
@@ -47,10 +66,21 @@ class SiteJavdb(SiteAvBase):
         search_url = f"{SITE_BASE_URL}/search?q={search_keyword_for_url}&f=all"
         logger.debug(f"JavDB Search: original='{original_keyword}', parsed_kw='{kw_ui_code}', url='{search_url}'")
 
-        tree = cls.get_tree(search_url)
+        tree = None
+        use_fs = cls.MetadataSetting.get_bool(f"jav_censored_{cls.site_name}_use_flaresolverr")
+        
+        if use_fs:
+            logger.debug(f"[{cls.site_name}] FlareSolverr is enabled. Using FlareSolverr for Search.")
+            tree, _ = cls._get_page_content_flaresolverr(search_url)
+        else:
+            tree = cls.get_tree(search_url)
 
         if tree is None:
-            logger.warning(f"JavDB Search: Failed to get content for '{original_keyword}' (curl_cffi failed).")
+            logger.error(f"[{cls.site_name}] Search failed to get HTML tree for: {search_url}")
+            return []
+
+        if cls._check_ip_block(tree):
+            logger.error(f"[{cls.site_name}] ⚠️ IP 차단 감지! '基於你的異常行為，管理員禁止了你的訪問' (Search: {kw_ui_code})")
             return []
 
         item_list_xpath_expression = '//div[(contains(@class, "item-list") or contains(@class, "movie-list"))]//div[contains(@class, "item")]/a[contains(@class, "box")]'
@@ -143,12 +173,20 @@ class SiteJavdb(SiteAvBase):
     # region INFO
     
     @classmethod
-    def info(cls, code, keyword=None, fp_meta_mode=False, skip_trans=False, is_validating=False, is_rescued=False):
+    def info(cls, code, keyword=None, extra_opts=None, **kwargs):
+        opts = dict(extra_opts or {})
+        opts.update(kwargs)
+
         ret = {}
-        entity_result_val_final = None
         try:
-            entity_result_val_final = cls.__info(code, keyword=keyword, fp_meta_mode=fp_meta_mode, skip_trans=skip_trans, is_validating=is_validating, is_rescued=is_rescued).as_dict()
-            if entity_result_val_final:
+            entity_obj = cls.__info(code, keyword=keyword, extra_opts=opts)
+            if entity_obj:
+                entity_result_val_final = entity_obj.as_dict()
+                if hasattr(entity_obj, 'original') and entity_obj.original:
+                    entity_result_val_final['original'] = entity_obj.original
+                if hasattr(entity_obj, 'extra_info') and entity_obj.extra_info:
+                    entity_result_val_final['extra_info'] = entity_obj.extra_info
+
                 ret["ret"] = "success"
                 ret["data"] = entity_result_val_final
             else:
@@ -162,23 +200,42 @@ class SiteJavdb(SiteAvBase):
 
 
     @classmethod
-    def __info(cls, code, keyword=None, fp_meta_mode=False, skip_trans=False, is_validating=False, is_rescued=False):
+    def __info(cls, code, keyword=None, extra_opts=None, **kwargs):
+        opts = dict(extra_opts or {})
+        opts.update(kwargs)
+
+        skip_trans = opts.get('skip_trans', False)
+        is_validating = opts.get('is_validating', False)
+        is_rescued = opts.get('is_rescued', False)
+
         original_code_for_url = code[len(cls.module_char) + len(cls.site_char):]
         detail_url = f"{SITE_BASE_URL}/v/{original_code_for_url}"
-        
+
         original_keyword = keyword
 
         logger.debug(f"JavDB Info: Accessing URL: {detail_url}")
-        tree = cls.get_tree(detail_url)
+        tree = None
+        use_fs = cls.MetadataSetting.get_bool(f"jav_censored_{cls.site_name}_use_flaresolverr")
+        
+        if use_fs:
+            logger.debug(f"[{cls.site_name}] FlareSolverr is enabled. Using FlareSolverr for Info.")
+            tree, _ = cls._get_page_content_flaresolverr(detail_url)
+        else:
+            tree = cls.get_tree(detail_url)
 
         if tree is None:
-            logger.warning(f"JavDB Info: Failed to get detail page for {code} (curl_cffi failed).")
+            logger.error(f"[{cls.site_name}] Info failed to get HTML tree for: {detail_url}")
+            return None
+
+        if cls._check_ip_block(tree):
+            logger.error(f"[{cls.site_name}] ⚠️ IP 차단 감지! '基於你的異常行為，管理員禁止了你的訪問' (Info: {code})")
             return None
 
         entity = EntityMovie(cls.site_name, code)
         entity.country = ['일본']; entity.mpaa = '청소년 관람불가'
         entity.thumb = []; entity.fanart = []; entity.extras = []; entity.ratings = []; entity.tag = []
         entity.original = {}
+        entity.extra_info['info_url'] = detail_url
 
         raw_ui_code_from_page = ""
         if id_panel_block := tree.xpath('//div[@class="panel-block" and ./strong[contains(text(),"ID:")]]/span[@class="value"]/text()'):
@@ -227,6 +284,7 @@ class SiteJavdb(SiteAvBase):
 
         if actual_raw_title_text and actual_raw_title_text != entity.ui_code:
             cleaned_tagline = cls.A_P(actual_raw_title_text)
+            entity.original['title'] = entity.originaltitle
             entity.original['tagline'] = cleaned_tagline
             if skip_trans:
                 entity.tagline = cleaned_tagline
@@ -275,7 +333,7 @@ class SiteJavdb(SiteAvBase):
                 if not entity.studio and studio_text.lower() not in ['n/a', '暂无', '暫無']:
                     studio_name = studio_text.split(',')[0].strip()
                     entity.original['studio'] = studio_name
-                    entity.studio = cls.trans(studio_name)
+                    entity.studio = AV_STUDIO.get(studio_name, studio_name)
             elif key == 'series':
                 series_text = value_node.xpath('normalize-space(./a/text())') or value_node.xpath('normalize-space()')
                 if series_text.lower() not in ['n/a', '暂无', '暫無']:
@@ -291,25 +349,31 @@ class SiteJavdb(SiteAvBase):
                     genre_name = genre_name_raw.strip()
                     if genre_name:
                         entity.original['genre'].append(genre_name)
-                        trans_genre = cls.trans(genre_name)
-                        if trans_genre not in entity.genre: 
+                        trans_genre = cls.get_translated_tag(genre_name)
+                        if trans_genre and trans_genre not in entity.genre:
                             entity.genre.append(trans_genre)
             elif key == 'actor(s)':
                 if entity.actor is None: entity.actor = []
                 for actor_node in value_node.xpath('./a'):
                     if 'female' in (actor_node.xpath('./following-sibling::strong[1]/@class') or [''])[0]:
                         actor_name = actor_node.xpath('string()').strip()
-                        if actor_name and actor_name.lower() not in ['n/a', '暂无', '暫無'] and not any(act.originalname == actor_name for act in entity.actor):
+                        if actor_name and actor_name.lower() not in ['n/a', '暂无', '暫無'] and not any((act.name_ko or act.name_org) == actor_name for act in entity.actor):
                             actor_entity = EntityActor(actor_name)
+                            href = actor_node.attrib.get('href', '').strip()
+                            actor_match = re.search(r'/actors/([^/?]+)', href)
+                            if actor_match:
+                                jdb_id = actor_match.group(1).strip()
+                                full_jdb_url = href if href.startswith('http') else f"{SITE_BASE_URL}{href}"
+                                actor_entity.extra_info = {
+                                    'site_actor_id': jdb_id,
+                                    'site_actor_url': full_jdb_url
+                                }
                             entity.actor.append(actor_entity)
-
-        if not entity.plot and entity.tagline and entity.tagline != entity.ui_code:
-            entity.plot = entity.tagline
 
         ps_url_from_search_cache = None
         try:
             raw_image_urls = cls.__img_urls(tree)
-            entity = cls.process_image_data(entity, raw_image_urls, ps_url_from_search_cache, is_validating=is_validating, is_rescued=is_rescued)
+            entity = cls.process_image_data(entity, raw_image_urls, ps_url_from_search_cache, extra_opts=opts)
         except Exception as e:
             logger.exception(f"JavDB: Error during image processing delegation for {code}: {e}")
 
@@ -318,8 +382,15 @@ class SiteJavdb(SiteAvBase):
             if trailer_source_tag:
                 trailer_url_raw = trailer_source_tag[0].strip()
                 if trailer_url_raw:
-                    trailer_url_final = "https:" + trailer_url_raw if trailer_url_raw.startswith("//") else trailer_url_raw
-                    trailer_url_final = cls.make_video_url(trailer_url_final)
+                    raw_trailer_url = "https:" + trailer_url_raw if trailer_url_raw.startswith("//") else trailer_url_raw
+                    if not hasattr(entity, 'original') or entity.original is None:
+                        entity.original = {}
+                    entity.original['extras'] = [{
+                        'content_url': raw_trailer_url,
+                        'content_type': 'trailer'
+                    }]
+
+                    trailer_url_final = cls.make_video_url(raw_trailer_url)
                     entity.extras.append(EntityExtra("trailer", entity.tagline or entity.ui_code, "mp4", trailer_url_final))
 
         if entity.originaltitle:

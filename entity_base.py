@@ -63,34 +63,63 @@ class EntityArt(object):
 """
 
 class EntityActor(object):
-    def __init__(self, name, site=''):
-        self.name = ''
-        self.name2 = ''
-        self.role = ''
+    def __init__(self, name_org='', site='', name_ko='', name_en='', thumb='', actor_idx='', role='', gender='', extra_info=None):
+        self.name_org = name_org or ''
+        self.name_ko = name_ko or ''
+        self.name_en = name_en or ''
+        self.role = role or ''
         self.order = ''
-        self.thumb = ''
-        self.originalname = name
+        self.thumb = thumb or ''
         self.site = site
         self.type = ''
         self.tmdb_id = ''
         self.ppkey = ''
-        # 2021-12-07 충사
-        self.name_original = name
+        self.actor_idx = actor_idx or ''
+        self.gender = gender or ''
+        self.extra_info = extra_info if isinstance(extra_info, dict) else {}
+
+    @property
+    def name(self):
+        return self.name_ko or self.name_org or ''
+
+    @name.setter
+    def name(self, val):
+        if val:
+            if not self.name_org:
+                self.name_org = val
+            if not self.name_ko:
+                self.name_ko = val
+        else:
+            self.name_org = ''
+
+    @property
+    def originalname(self):
+        return self.name_org or self.name_ko or ''
+
+    @originalname.setter
+    def originalname(self, val):
+        self.name_org = val
 
     def as_dict(self):
+        name_val = self.name_ko or self.name_org or ''
         return {
-            'name' : self.name,
+            'name' : name_val,
+            'name_org' : self.name_org,
+            'name_ko' : self.name_ko,
+            'name_en' : self.name_en,
             'role' : self.role,
             'order' : self.order,
             'thumb' : self.thumb,
-            'originalname' : self.originalname,
+            'originalname' : self.name_org or name_val,
             'site' : self.site,
-            'name2' : self.name2,
             'type' : self.type,
-            'name_original' : self.name_original,
             'tmdb_id' : self.tmdb_id,
             'ppkey' : self.ppkey,
+            'actor_idx' : self.actor_idx,
+            'gender' : self.gender,
+            'extra_info' : self.extra_info,
         }
+
 
 
 class EntityExtra(object):
@@ -185,11 +214,11 @@ class EntityMovie(object):
             'title' : self.title,
             'originaltitle' : self.originaltitle,
             'sorttitle' : self.sorttitle,
-            'ratings' : [x.as_dict() for x in self.ratings] if self.ratings is not None else None,
+            'ratings' : [x.as_dict() if hasattr(x, 'as_dict') else x for x in self.ratings] if self.ratings is not None else None,
             'userrating' : self.userrating,
             'plot' : self.plot,
             'runtime' : self.runtime,
-            'thumb' : [x.as_dict() for x in self.thumb] if self.thumb is not None else None,
+            'thumb' : [x.as_dict() if hasattr(x, 'as_dict') else x for x in self.thumb] if self.thumb is not None else None,
             'fanart' : self.fanart,
             'genre' : self.genre,
             'country' : self.country,
@@ -199,10 +228,10 @@ class EntityMovie(object):
             'year' : self.year,
             'studio' : self.studio,
             'trailer' : self.trailer,
-            'actor' : [x.as_dict() for x in self.actor] if self.actor is not None else None,
+            'actor' : [x.as_dict() if hasattr(x, 'as_dict') else x for x in self.actor] if self.actor is not None else None,
             'tag' : self.tag,
             'tagline' : self.tagline,
-            'extras' :  [x.as_dict() for x in self.extras] if self.extras is not None else None,
+            'extras' : [x.as_dict() if hasattr(x, 'as_dict') else x for x in self.extras] if self.extras is not None else None,
             'mpaa' : self.mpaa,
             'extra_info' : self.extra_info
         }
@@ -773,10 +802,9 @@ class EntitySeason(object):
 
 
 class EntityActor2(object):
-    def __init__(self, site='', name='', name_en='', name_ko='', role='', image='', name_original=''):
+    def __init__(self, site='', name_ko='', name_en='', role='', image='', name_org=''):
         self.site = site
-        self.name = name
-        self.name_original = name_original
+        self.name_org = name_org
         self.role = role
         self.image = image
         self.name_en = name_en
@@ -790,15 +818,40 @@ class EntityActor2(object):
         self.image_source = ''
         self.tvdb = None
 
+    @property
+    def name(self):
+        return self.name_ko or self.name_org or ''
+
+    @name.setter
+    def name(self, val):
+        if val:
+            if not self.name_org:
+                self.name_org = val
+            if not self.name_ko:
+                self.name_ko = val
+        else:
+            self.name_org = ''
+
+    @property
+    def thumb(self):
+        return self.image or ''
+
+    @thumb.setter
+    def thumb(self, val):
+        self.image = val or ''
+
     def as_dict(self):
+        name_val = self.name_ko or self.name_org or ''
         return {
+            'name' : name_val,
             'site' : self.site,
-            'name' : self.name,
-            'name_original' : self.name_original,
+            'name_org' : self.name_org,
             'name_en' : self.name_en,
             'name_ko' : self.name_ko,
             'role' : self.role,
             'image' : self.image,
+            'thumb' : self.image or '',
+            'originalname' : self.name_org or name_val,
             'tmdb_id' : self.tmdb_id,
             'tmdb_credit_id': self.tmdb_credit_id,
             'order' : self.order,

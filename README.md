@@ -25,6 +25,10 @@ upstream(`flaskfarm/support_site`)의 업데이트를 주기적으로 머지한�
 ## 공동개발
 
 ## Changelog
+- 1.3.24 (2026.09.01)
+  - metadata/meta_db 모듈 추가 대응 수정(1.3.x)
+  - 커스텀 비디오 지문 테이블 추가/DB 처리 로직 개선
+<br><br>
 - 1.2.22 (2026.03.28)
     - evvaW
         - 태그 검색 추가

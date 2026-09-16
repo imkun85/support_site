@@ -77,13 +77,13 @@ class SiteDmm(SiteAvBase):
         search_url = f"{SITE_BASE_URL}/search/=/searchstr={quote(keyword_for_url)}/limit=120/sort=rankprofile/"
         logger.debug(f"DMM Search URL: {search_url}")
 
-        search_headers = cls.get_request_headers(referer=FANZA_AV_URL)
         tree = None
         try:
-            tree = cls.get_tree(search_url, headers=search_headers, allow_redirects=True)
+            tree = cls.get_tree(search_url, headers={'Referer': FANZA_AV_URL}, allow_redirects=True)
             if tree is None: 
                 logger.warning(f"DMM Search: Search tree is None for '{original_keyword}'. URL: {search_url}")
                 return []
+
             title_tags_check = tree.xpath('//title/text()')
             if title_tags_check and "年齢認証 - FANZA" in title_tags_check[0]: 
                 logger.error(f"DMM Search: Age page received for '{original_keyword}'.")
@@ -522,13 +522,23 @@ class SiteDmm(SiteAvBase):
     # region INFO
 
     @classmethod
-    def info(cls, code, keyword=None, fp_meta_mode=False, skip_trans=False, is_validating=False, is_rescued=False):
+    def info(cls, code, keyword=None, extra_opts=None, **kwargs):
+        opts = dict(extra_opts or {})
+        opts.update(kwargs)
+
         ret = {}
         entity_result_val_final = None
         try:
-            entity_result_val_final = cls.__info(code, keyword=keyword, fp_meta_mode=fp_meta_mode, skip_trans=skip_trans, is_validating=is_validating, is_rescued=is_rescued).as_dict()
-            if entity_result_val_final: 
-                ret["ret"] = "success"; 
+            entity_obj = cls.__info(code, keyword=keyword, extra_opts=opts)
+            if entity_obj:
+                entity_result_val_final = entity_obj.as_dict()
+
+                if hasattr(entity_obj, 'original') and entity_obj.original:
+                    entity_result_val_final['original'] = entity_obj.original
+                if hasattr(entity_obj, 'extra_info') and entity_obj.extra_info:
+                    entity_result_val_final['extra_info'] = entity_obj.extra_info
+
+                ret["ret"] = "success"
                 ret["data"] = entity_result_val_final
             else: 
                 ret["ret"] = "error"
@@ -541,10 +551,17 @@ class SiteDmm(SiteAvBase):
 
 
     @classmethod
-    def __info(cls, code, keyword=None, fp_meta_mode=False, skip_trans=False, is_validating=False, is_rescued=False):
+    def __info(cls, code, keyword=None, extra_opts=None, **kwargs):
+        opts = dict(extra_opts or {})
+        opts.update(kwargs)
+
+        skip_trans = opts.get('skip_trans', False)
+        is_validating = opts.get('is_validating', False)
+        is_rescued = opts.get('is_rescued', False)
 
         cached_data = cls._ps_url_cache.get(code, {})
-        ps_url_from_search_cache = None # kwargs.get('ps_url')
+        ps_url_from_search_cache = opts.get('ps_url')
+
         if not ps_url_from_search_cache:
             content_type_from_cache = cached_data.get('main_content_type', 'unknown')
             if (content_type_from_cache == 'unknown' or not cached_data.get(content_type_from_cache)) and cached_data: 
@@ -605,7 +622,7 @@ class SiteDmm(SiteAvBase):
             trusted_ui_code_from_keyword, _, _ = cls._parse_ui_code(trusted_keyword)
             logger.debug(f"DMM Info: Verifying against trusted UI code '{trusted_ui_code_from_keyword}' from keyword '{trusted_keyword}'.")
 
-        # === 1. 타입별 데이터 소스 분기 ===
+        # 타입별 데이터 소스 분기
         if entity.content_type in ['videoa', 'vr', 'amateur']:
             # --- videoa/vr은 GraphQL API 호출 ---
             # logger.debug(f"DMM Info (API): Getting info for {code} (type: {entity.content_type})")
@@ -689,16 +706,22 @@ class SiteDmm(SiteAvBase):
             logger.debug(f"DMM Info (HTML): Getting info for {code} (type: {entity.content_type})")
             detail_url = SITE_BASE_URL + f"/mono/dvd/-/detail/=/cid={cid_part}/"
             referer = SITE_BASE_URL + "/mono/dvd/"
-            headers = cls.get_request_headers(referer=referer)
             try:
                 logger.info(f"DMM INFO URL: {detail_url}")
-                tree = cls.get_tree(detail_url, headers=headers, timeout=30, verify=False)
+                tree = cls.get_tree(detail_url, headers={'Referer': referer}, timeout=30, verify=False)
                 if tree is None: 
                     logger.error(f"DMM Info (DVD): Failed to get page tree for {code}."); return None
             except Exception as e_gt_info_dmm: 
                 logger.exception(f"DMM Info (DVD): Exc getting detail page: {e_gt_info_dmm}"); return None
 
-        # === 2. 전체 메타데이터 파싱 ===
+        if entity.content_type == 'amateur':
+            entity.extra_info['info_url'] = f"https://video.dmm.co.jp/amateur/content/?id={cid_part}"
+        elif entity.content_type in ['videoa', 'vr']:
+            entity.extra_info['info_url'] = f"https://video.dmm.co.jp/av/content/?id={cid_part}"
+        else:
+            entity.extra_info['info_url'] = detail_url
+
+        # 전체 메타데이터 파싱
         try:
             if api_data:
                 content = api_data.get('ppvContent')
@@ -715,9 +738,12 @@ class SiteDmm(SiteAvBase):
                 title_val = content.get('title')
                 if title_val: 
                     original_tagline = cls.A_P(title_val)
+                    entity.original['title'] = entity.originaltitle
                     entity.original['tagline'] = original_tagline
                     if skip_trans:
                         entity.tagline = original_tagline
+                    elif entity.content_type == 'amateur':
+                        entity.tagline = cls.trans_amateur_title(original_tagline, entity=entity)
                     else:
                         entity.tagline = cls.trans_by_llm(original_tagline)
 
@@ -755,29 +781,38 @@ class SiteDmm(SiteAvBase):
                     amateur_actress_obj = content.get('amateurActress')
                     if amateur_actress_obj:
                         actors_list_raw.append(amateur_actress_obj)
-                else:  # videoa, vr
+                else:
                     actors_list_raw = content.get('actresses', [])
 
                 if actors_list_raw:
                     actors = []
                     for actress in actors_list_raw:
                         if isinstance(actress, dict) and actress.get('name'):
-                            actors.append(EntityActor(actress['name']))
+                            act_obj = EntityActor(actress['name'])
+                            if actress.get('id'):
+                                a_id = str(actress['id']).strip()
+                                act_obj.extra_info = {
+                                    'site_actor_id': a_id,
+                                    'site_actor_url': f"https://video.dmm.co.jp/av/list/?actress={a_id}"
+                                }
+                            actors.append(act_obj)
                     entity.actor = actors
 
                 directors_list = content.get('directors')
                 if directors_list and isinstance(directors_list[0], dict) and directors_list[0].get('name'):
-                    entity.director = directors_list[0]['name']
+                    dir_name = directors_list[0]['name'].strip()
+                    entity.director = dir_name
+                    entity.original['director'] = dir_name
 
                 if content.get('label') and content.get('label').get('name'):
                     label_name = content['label']['name']
                     entity.original['studio'] = label_name
-                    entity.studio = AV_STUDIO.get(label_name, cls.trans(label_name))
+                    entity.studio = AV_STUDIO.get(label_name, label_name)
 
                 elif content.get('maker') and content.get('maker').get('name'):
                     maker_name = content['maker']['name']
                     entity.original['studio'] = maker_name
-                    entity.studio = cls.trans(maker_name)
+                    entity.studio = AV_STUDIO.get(maker_name, maker_name)
 
                 if content.get('series') and content.get('series').get('name'):
                     series_name = content['series']['name']
@@ -799,13 +834,9 @@ class SiteDmm(SiteAvBase):
                         if "％OFF" in g_ja or g_ja in AV_GENRE_IGNORE_JA: continue
 
                         entity.original['genre'].append(g_ja)
-
-                        if g_ja in AV_GENRE: 
-                            entity.genre.append(AV_GENRE[g_ja])
-                        else:
-                            g_ko = cls.trans(g_ja).replace(" ", "")
-                            if g_ko not in AV_GENRE_IGNORE_KO: 
-                                entity.genre.append(g_ko)
+                        trans_genre = cls.get_translated_tag(g_ja)
+                        if trans_genre and trans_genre not in AV_GENRE_IGNORE_KO and trans_genre not in entity.genre:
+                            entity.genre.append(trans_genre)
 
             elif tree is not None:
                 # --- HTML에서 데이터 파싱 (dvd/bluray) ---
@@ -841,9 +872,24 @@ class SiteDmm(SiteAvBase):
                         m_rt_dvd = re.search(r"(\d+)",value_text_all_dvd)
                         if m_rt_dvd: entity.runtime = int(m_rt_dvd.group(1))
                     elif "出演者" in key_dvd:
-                        actors_dvd = [a.strip() for a in value_node_dvd.xpath('.//a/text()') if a.strip()]
-                        if actors_dvd: entity.actor = [EntityActor(name) for name in actors_dvd]
-                        elif value_text_all_dvd != '----': entity.actor = [EntityActor(n.strip()) for n in value_text_all_dvd.split('/') if n.strip()]
+                        actors_dvd = []
+                        for a_tag in value_node_dvd.xpath('.//a'):
+                            act_name = a_tag.text_content().strip()
+                            if not act_name: continue
+                            act_obj = EntityActor(act_name)
+                            href_val = a_tag.attrib.get('href', '').strip()
+                            m_id = re.search(r'(?:article=actress/id=|actress=)(\d+)', href_val)
+                            if m_id:
+                                a_id = m_id.group(1)
+                                act_obj.extra_info = {
+                                    'site_actor_id': a_id,
+                                    'site_actor_url': f"https://video.dmm.co.jp/av/list/?actress={a_id}"
+                                }
+                            actors_dvd.append(act_obj)
+                        if actors_dvd:
+                            entity.actor = actors_dvd
+                        elif value_text_all_dvd != '----':
+                            entity.actor = [EntityActor(n.strip()) for n in value_text_all_dvd.split('/') if n.strip()]
                     elif "監督" in key_dvd:
                         directors_dvd = [d.strip() for d in value_node_dvd.xpath('.//a/text()') if d.strip()]
                         if directors_dvd: entity.director = directors_dvd[0] 
@@ -863,13 +909,13 @@ class SiteDmm(SiteAvBase):
                             m_name_dvd = (makers_dvd[0] if makers_dvd else value_text_all_dvd).strip()
                             if m_name_dvd and m_name_dvd != '----':
                                 entity.original['studio'] = m_name_dvd
-                                entity.studio = cls.trans(m_name_dvd)
+                                entity.studio = AV_STUDIO.get(m_name_dvd, m_name_dvd)
                     elif "レーベル" in key_dvd:
                         labels_dvd = [lb.strip() for lb in value_node_dvd.xpath('.//a/text()') if lb.strip()]
                         l_name_dvd = (labels_dvd[0] if labels_dvd else value_text_all_dvd).strip()
                         if l_name_dvd and l_name_dvd != '----':
                             entity.original['studio'] = l_name_dvd
-                            entity.studio = AV_STUDIO.get(l_name_dvd, cls.trans(l_name_dvd))
+                            entity.studio = AV_STUDIO.get(l_name_dvd, l_name_dvd)
                     elif "ジャンル" in key_dvd:
                         if entity.genre is None: entity.genre = []
                         if 'genre' not in entity.original: entity.original['genre'] = []
@@ -877,14 +923,10 @@ class SiteDmm(SiteAvBase):
                             genre_ja_dvd = genre_ja_tag_dvd.text_content().strip()
                             if not genre_ja_dvd or "％OFF" in genre_ja_dvd or genre_ja_dvd in AV_GENRE_IGNORE_JA: 
                                 continue
-                            entity.original['genre'].append(genre_ja_dvd) # <<-- [수정]
-                            if genre_ja_dvd in AV_GENRE:
-                                if AV_GENRE[genre_ja_dvd] not in entity.genre: 
-                                    entity.genre.append(AV_GENRE[genre_ja_dvd])
-                            else:
-                                genre_ko_dvd = cls.trans(genre_ja_dvd).replace(" ", "")
-                                if genre_ko_dvd not in AV_GENRE_IGNORE_KO and genre_ko_dvd not in entity.genre :
-                                    entity.genre.append(genre_ko_dvd)
+                            entity.original['genre'].append(genre_ja_dvd)
+                            trans_genre = cls.get_translated_tag(genre_ja_dvd)
+                            if trans_genre and trans_genre not in AV_GENRE_IGNORE_KO and trans_genre not in entity.genre:
+                                entity.genre.append(trans_genre)
 
                     # 출시일 관련 정보 수집
                     elif "商品発売日" in key_dvd: premiered_shouhin_dvd = value_text_all_dvd.replace("/", "-")
@@ -940,6 +982,7 @@ class SiteDmm(SiteAvBase):
             if identifier_parsed:
                 ui_code_for_image = entity.ui_code.lower()
                 entity.title = entity.originaltitle = entity.sorttitle = ui_code_for_image.upper()
+                entity.original['title'] = entity.originaltitle
 
                 parsed_label = entity.ui_code.split('-')[0] if '-' in entity.ui_code else entity.ui_code
                 if entity.tag is None: entity.tag = []
@@ -953,32 +996,34 @@ class SiteDmm(SiteAvBase):
                 else:
                     entity.tagline = cls.trans_by_llm(fallback_tagline)
 
-            if not entity.plot and entity.tagline: 
-                entity.plot = entity.tagline 
-
         except Exception as e_meta:
             logger.exception(f"DMM Meta parsing error for {code}: {e_meta}")
             return None
 
-        # === 3. 이미지 처리: 모든 이미지 관련 로직을 공통 메서드에 위임 ===
+        # 이미지 처리 위임
         try:
-            # 원본 이미지 URL 목록 수집
             raw_image_urls = cls.__img_urls(
                 tree, 
                 content_type=entity.content_type,
                 api_data=api_data
             )
-            entity = cls.process_image_data(entity, raw_image_urls, ps_url_from_search_cache, is_validating=is_validating, is_rescued=is_rescued)
+            entity = cls.process_image_data(entity, raw_image_urls, ps_url_from_search_cache, extra_opts=opts)
 
         except Exception as e:
             logger.exception(f"DMM: Error during image processing for {code}: {e}")
 
-        # === 4. 예고편(Extras) 처리 ===
+        # 예고편(Extras) 처리
 
         if cls.config['use_extras']:
             cls.process_extras(entity, tree, detail_url, api_data)
 
-        # === 5. Landscape(PL) 이미지 폴백 로직 ===
+        if entity.content_type == 'amateur' and entity.originaltitle:
+            try:
+                entity = cls.shiroutoname_info(entity)
+            except Exception as e_shirouto:
+                logger.debug(f"[{cls.site_name}] Amateur Shiroutoname 보정 중 오류 ({entity.originaltitle}): {e_shirouto}")
+
+        # Landscape(PL) 이미지 폴백 로직
         try:
             has_landscape = any(thumb.aspect == 'landscape' for thumb in entity.thumb)
 
@@ -1134,7 +1179,7 @@ class SiteDmm(SiteAvBase):
     @classmethod
     def process_extras(cls, entity, tree, detail_url, api_data=None):
         entity.extras = []
-        trailer_title_for_extra = entity.tagline if entity.tagline else entity.ui_code
+        trailer_title_for_extra = entity.tagline or entity.ui_code
         trailer_url_final = None
         code = entity.code
         try:
@@ -1184,6 +1229,14 @@ class SiteDmm(SiteAvBase):
 
             if trailer_url_final:
                 logger.debug(f"DMM Trailer: Found URL for {code}: {trailer_url_final}")
+
+                if not hasattr(entity, 'original') or entity.original is None:
+                    entity.original = {}
+                entity.original['extras'] = [{
+                    'content_url': trailer_url_final,
+                    'content_type': 'trailer'
+                }]
+
                 url = cls.make_video_url(trailer_url_final)
                 if url:
                     entity.extras.append(EntityExtra("trailer", trailer_title_for_extra, "mp4", url))
@@ -1206,8 +1259,9 @@ class SiteDmm(SiteAvBase):
             player_page_url = f"https://www.dmm.co.jp/service/digitalapi/-/html5_player/=/cid={cid_part}"
             logger.debug(f"DMM Trailer Helper ({current_content_type_for_log}): Accessing player page: {player_page_url}")
 
-            player_page_text = cls.get_text(player_page_url, headers=cls.get_request_headers(referer=detail_url_for_referer))
-            
+            headers = {'Referer': detail_url_for_referer} if detail_url_for_referer else None
+            player_page_text = cls.get_text(player_page_url, headers=headers)
+
             if player_page_text:
                 match = re.search(r'const\s+args\s*=\s*(\{.*?\});', player_page_text, re.DOTALL)
                 if match:
@@ -1242,7 +1296,8 @@ class SiteDmm(SiteAvBase):
         try:
             vr_player_page_url = f"{SITE_BASE_URL}/digital/-/vr-sample-player/=/cid={cid_part}/"
             logger.debug(f"DMM VR Trailer: Accessing player page: {vr_player_page_url}")
-            vr_player_html = cls.get_text(vr_player_page_url, headers=cls.get_request_headers(referer=detail_url_for_referer))
+            headers = {'Referer': detail_url_for_referer} if detail_url_for_referer else None
+            vr_player_html = cls.get_text(vr_player_page_url, headers=headers)
             if vr_player_html:
                 match_js_var = re.search(r'var\s+sampleUrl\s*=\s*["\']([^"\']+)["\']', vr_player_html)
                 if match_js_var:
@@ -1327,14 +1382,6 @@ class SiteDmm(SiteAvBase):
         return keyword_for_url, label_part_for_retry, num_part_for_retry
 
 
-    # 기본헤더에서 Referer를 설정하여 요청 헤더를 반환하는 메서드
-    # 복사 불필요
-    @classmethod
-    def get_request_headers(cls, referer=None):
-        cls.default_headers['Referer'] = referer
-        return cls.default_headers
-
-
     # 인증확인.
     @classmethod
     def _ensure_age_verified(cls):
@@ -1355,7 +1402,7 @@ class SiteDmm(SiteAvBase):
             confirm_response = cls.get_response( 
                 urljoin(SITE_BASE_URL, f"/age_check/=/declared=yes/?rurl={quote(FANZA_AV_URL, safe='')}"), 
                 method='GET', 
-                headers=cls.get_request_headers(referer=SITE_BASE_URL + "/"), 
+                headers={'Referer': SITE_BASE_URL + "/"}, 
                 allow_redirects=False, verify=False
             )
             if confirm_response.status_code == 302 and 'age_check_done=1' in confirm_response.headers.get('Set-Cookie', ''):
@@ -1428,4 +1475,3 @@ class SiteDmm(SiteAvBase):
 
     # endregion SiteAvBase 메서드 오버라이드
     ################################################
-

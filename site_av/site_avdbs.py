@@ -4,7 +4,7 @@ import sqlite3
 from urllib.parse import urljoin, urlencode, quote
 from lxml import html
 
-from ..setup import P, logger
+from ..setup import *
 from .site_av_base import SiteAvBase
 
 SITE_BASE_URL = "https://www.avdbs.com"
@@ -15,128 +15,247 @@ class SiteAvdbs(SiteAvBase):
     default_headers = SiteAvBase.base_default_headers.copy()
 
     @classmethod
-    def get_actor_info(cls, entity_actor) -> bool:
-        original_input_name = entity_actor.get("originalname")
+    def get_actor_info(cls, entity_actor, extra_opts=None, **kwargs) -> bool:
+        opts = dict(extra_opts or {})
+        opts.update(kwargs)
+
+        original_input_name = entity_actor.get("name_org")
         if not original_input_name:
-            logger.warning("배우 정보 조회 불가: originalname이 없습니다.")
+            logger.warning("배우 정보 조회 불가: name_org(원문명)가 없습니다.")
             return False
 
         name_variations_to_search = cls._parse_name_variations(original_input_name)
         final_info = None
-        if cls.config['use_local_db']:
+
+        use_meta_db_person = cls.MetadataSetting.get_bool("meta_db_use")
+        if use_meta_db_person:
+            final_info = cls._search_from_meta_person_db(name_variations_to_search)
+        elif cls.config.get('use_local_db', True):
             final_info = cls._search_from_local_db(name_variations_to_search)
-        if final_info is None and cls.config['use_web_search']:
+
+        if final_info is None and cls.config.get('use_web_search'):
             final_info = cls._search_from_web(original_input_name)
         
         if final_info is not None:
-            entity_actor["name"] = final_info["name"]
-            entity_actor["name2"] = final_info["name2"]
-            entity_actor["thumb"] = final_info["thumb"]
+            entity_actor["name_org"] = final_info.get("name_org", original_input_name)
+            entity_actor["name_ko"] = final_info.get("name_ko", "")
+            entity_actor["name_en"] = final_info.get("name_en", "")
+            entity_actor["thumb"] = final_info.get("thumb", "")
             entity_actor["site"] = final_info.get("site", "unknown_source")
-            # actor_idx는 save_actor_image 등에서 사용하기 위해 저장
             if final_info.get("actor_idx"):
-                # EntityActor 클래스 구조에 따라 저장 방식이 다를 수 있음 (속성 추가)
                 try: entity_actor.actor_idx = final_info.get("actor_idx")
                 except: entity_actor["actor_idx"] = final_info.get("actor_idx")
             return True
         return False
 
 
+    # meta_person 통합 인물 테이블에서 배우 조회
+    @classmethod
+    def _search_from_meta_person_db(cls, name_variations_to_search):
+        try:
+            meta_plugin = F.PluginManager.get_plugin_instance('metadata')
+            if not meta_plugin:
+                return None
+            meta_db_mod = meta_plugin.get_module('meta_db')
+            if not meta_db_mod:
+                return None
+
+            for search_name in name_variations_to_search:
+                clean_target = str(search_name or '').strip()
+                if not clean_target:
+                    continue
+
+                results = meta_db_mod.person_search(clean_target, domain="JAV")
+                if not results:
+                    continue
+
+                matched_item = None
+                target_lower = clean_target.lower()
+
+                for cand in results:
+                    cand_org = str(cand.get('name_org') or '').strip().lower()
+                    cand_ko = str(cand.get('name_ko') or '').strip().lower()
+                    cand_en = str(cand.get('name_en') or '').strip().lower()
+                    cand_aliases = [str(a).strip().lower() for a in (cand.get('aliases') or []) if str(a).strip()]
+
+                    # 원문명, 한국어명, 영문명, 별칭과 100% 일치하거나 DB other_names의 괄호 안 원문명과 일치할 때만 승인
+                    is_matched = (target_lower in (cand_org, cand_ko, cand_en) or target_lower in cand_aliases)
+                    if not is_matched and cand.get('other_names'):
+                        is_matched = cls._parse_and_match_other_names(cand['other_names'], clean_target)
+
+                    if is_matched:
+                        matched_item = cand
+                        break
+
+                if matched_item:
+                    logger.debug(f"AVDBS MetaPerson 100% Match: '{clean_target}' -> {matched_item.get('name_ko') or matched_item.get('name_org')} ({matched_item.get('person_idx')})")
+                    return {
+                        "name_org": matched_item.get("name_org", ""),
+                        "name_ko": matched_item.get("name_ko", ""),
+                        "name_en": matched_item.get("name_en", ""),
+                        "thumb": matched_item.get("thumb", ""),
+                        "actor_idx": matched_item.get("person_idx", ""),
+                        "site": "meta_person_db"
+                    }
+        except Exception as e:
+            logger.debug(f"AVDBS MetaPerson search error: {e}")
+        return None
+
+
     @classmethod
     def _search_from_local_db(cls, name_variations_to_search):
-        if not (cls.config['local_db_path'] and os.path.exists(cls.config['local_db_path'])):
+        # metadata 플러그인의 단일 배포 경로(/metadata/files/) 참조
+        target_dir = None
+        try:
+            meta_plugin = F.PluginManager.get_plugin_instance('metadata')
+            if meta_plugin and hasattr(meta_plugin, 'plugin_root'):
+                target_dir = os.path.join(meta_plugin.plugin_root, 'files')
+        except Exception: pass
+
+        if not target_dir or not os.path.isdir(target_dir):
+            target_dir = os.path.join(os.path.dirname(PLUGIN_ROOT), 'metadata', 'files')
+
+        if not os.path.isdir(target_dir):
             return None
 
-        db_path = os.path.abspath(cls.config['local_db_path'])
+        candidates = []
+        pattern = re.compile(r'^jav_actors(?:2)?_(\d{8})\.db$', re.IGNORECASE)
+
+        try:
+            for f in os.listdir(target_dir):
+                m = pattern.match(f)
+                if m:
+                    full_p = os.path.join(target_dir, f)
+                    if os.path.isfile(full_p):
+                        candidates.append((m.group(1), full_p))
+        except Exception: pass
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        db_path = candidates[0][1]
+
+        # 단일 우선순위 문자열 및 이미지 서버 프리픽스 로드
+        img_order = cls.config.get("actor_img_order") or "google_fileid, avdbs_img_url, local_img_path"
+        prefix = cls.config.get('image_url_prefix') or ""
 
         try:
             with sqlite3.connect(db_path, timeout=10) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
 
+                cursor.execute("PRAGMA table_info(actors)")
+                existing_cols = {col[1] for col in cursor.fetchall()}
+
+                col_org = 'name_org' if 'name_org' in existing_cols else 'inner_name_cn'
+                col_ko = 'name_ko' if 'name_ko' in existing_cols else 'inner_name_kr'
+                col_en = 'name_en' if 'name_en' in existing_cols else 'inner_name_en'
+                col_onm = 'actor_onm' if 'actor_onm' in existing_cols else ('aliases' if 'aliases' in existing_cols else col_org)
+                has_site_col = 'site' in existing_cols
+
                 for current_search_name in name_variations_to_search:
-                    row = None
-                    query1 = "SELECT * FROM actors WHERE site = ? AND inner_name_cn = ? LIMIT 1"
-                    cursor.execute(query1, (cls.site_name, current_search_name))
+                    site_filter = "site = ? AND " if has_site_col else ""
+                    site_params = (cls.site_name,) if has_site_col else ()
+
+                    query1 = f"SELECT * FROM actors WHERE {site_filter}{col_org} = ? LIMIT 1"
+                    cursor.execute(query1, site_params + (current_search_name,))
                     row = cursor.fetchone()
                     
                     if not row:
-                        query2 = """
-                            SELECT *
-                            FROM actors 
-                            WHERE site = ? AND (actor_onm LIKE ? OR inner_name_cn LIKE ?)
-                        """
-                        like_search_term = f"%{current_search_name}%"
-                        cursor.execute(query2, (cls.site_name, like_search_term, like_search_term))
+                        query2 = f"SELECT * FROM actors WHERE {site_filter}({col_onm} LIKE ? OR {col_org} LIKE ?)"
+                        like_term = f"%{current_search_name}%"
+                        cursor.execute(query2, site_params + (like_term, like_term))
                         potential_rows = cursor.fetchall()
                         if potential_rows:
                             for potential_row in potential_rows:
                                 matched_by_onm = False
-                                if potential_row["actor_onm"]:
-                                    matched_by_onm = cls._parse_and_match_other_names(potential_row["actor_onm"], current_search_name)
+                                if col_onm in potential_row.keys() and potential_row[col_onm]:
+                                    matched_by_onm = cls._parse_and_match_other_names(potential_row[col_onm], current_search_name)
                                 
                                 matched_by_cn = False
-                                if potential_row["inner_name_cn"]:
-                                    cn_parts = set()
-                                    cn_text = potential_row["inner_name_cn"]
-                                    for part in re.split(r'[（）()/]', cn_text):
-                                        cleaned_part = part.strip()
-                                        if cleaned_part:
-                                            cn_parts.add(cleaned_part)
+                                if col_org in potential_row.keys() and potential_row[col_org]:
+                                    cn_parts = {part.strip() for part in re.split(r'[（）()/]', potential_row[col_org]) if part.strip()}
                                     if current_search_name in cn_parts:
                                         matched_by_cn = True
 
-                                if matched_by_onm or matched_by_cn:
-                                    row = potential_row
-                                    logger.debug(f"DB 검색 2단계: '{current_search_name}' 매칭 성공 (ONM: {matched_by_onm}, CN: {matched_by_cn})")
-                                    break
+                                    if matched_by_onm or matched_by_cn:
+                                        row = potential_row
+                                        break
+
                     if not row:
-                        query3 = "SELECT * FROM actors WHERE site = ? AND (inner_name_kr = ? OR inner_name_en = ? OR inner_name_en LIKE ?) LIMIT 1"
-                        cursor.execute(query3, (cls.site_name, current_search_name, current_search_name, f"%({current_search_name})%"))
+                        query3 = f"SELECT * FROM actors WHERE {site_filter}({col_ko} = ? OR {col_en} = ? OR {col_en} LIKE ?) LIMIT 1"
+                        cursor.execute(query3, site_params + (current_search_name, current_search_name, f"%({current_search_name})%"))
                         row = cursor.fetchone()
                     
                     if row:
-                        korean_name = row["inner_name_kr"]
-                        name2_field = row["inner_name_en"] if row["inner_name_en"] else ""
-                        db_relative_path = row["profile_img_path"]
-                        thumb_url = ""
-
-                        # 2025.07.14 by soju
-                        # 구글 cdn
-                        if 'google_fileid' in row.keys() and row['google_fileid']:
-                            thumb_url = f"https://drive.google.com/thumbnail?id={row['google_fileid']}"
-                        else:
-                            if cls.config['image_url_prefix']:
-                                thumb_url = cls.config['image_url_prefix'] + '/' + db_relative_path.lstrip('/')
-                                # logger.debug(f"DB: 이미지 URL 생성 (Prefix 사용): {thumb_url}")
-                            else:
-                                thumb_url = db_relative_path
-                                logger.warning(f"DB: db_image_base_url (jav_actor_img_url_prefix) 설정 없음. 상대 경로 사용: {thumb_url}")
-                            
-                        if name2_field:
-                            match_name2 = re.match(r"^(.*?)\s*\(.*\)$", name2_field)
-                            if match_name2: name2_field = match_name2.group(1).strip()
+                        korean_name = row[col_ko] if col_ko in row.keys() else ""
+                        name_en_field = row[col_en] if (col_en in row.keys() and row[col_en]) else ""
+                        name_org_field = row[col_org] if (col_org in row.keys() and row[col_org]) else current_search_name
                         
-                        # actor_idx 추출 (A11340 -> 11340)
-                        actor_idx = ""
-                        if row["actor_id"]:
-                            match = re.search(r'(\d+)', row["actor_id"])
-                            if match: actor_idx = match.group(1)
+                        # 단일 우선순위 문자열 규칙으로 썸네일 URL 추출
+                        thumb_url = cls._resolve_local_db_thumb_url(row, order_str=img_order, img_prefix=prefix)
+                            
+                        if name_en_field:
+                            match_name_en = re.match(r"^(.*?)\s*\(.*\)$", name_en_field)
+                            if match_name_en:
+                                name_en_field = match_name_en.group(1).strip()
+                        
+                        actor_idx = str(row["actor_id"] or "").strip() if "actor_id" in row.keys() else ""
 
                         if korean_name and thumb_url:
-                            logger.debug(f"AVDBS DB: Match found for '{current_search_name}': {korean_name} ({name2_field})")
-                            final_info = {
-                                "name": korean_name, 
-                                "name2": name2_field, 
+                            logger.debug(f"AVDBS DB: Match found for '{current_search_name}': {korean_name} ({name_en_field})")
+
+                            return {
+                                "name_org": str(name_org_field).strip(),
+                                "name_ko": korean_name, 
+                                "name_en": name_en_field, 
                                 "thumb": thumb_url, 
                                 "actor_idx": actor_idx,
-                                "site": f"{cls.site_name}_db"}
-                            return final_info
+                                "site": f"{cls.site_name}_db"
+                            }
 
         except sqlite3.Error as e: 
             logger.error(f"DB 조회 중 오류: {e}")
         
         return None
+
+    @classmethod
+    def _resolve_local_db_thumb_url(cls, r, order_str="google_fileid, local_img_path, site_img_url", img_prefix=""):
+        if not r:
+            return ""
+
+        r_dict = dict(r) if (hasattr(r, 'keys') and not isinstance(r, dict)) else (r if isinstance(r, dict) else {})
+        parsed_order = [x.strip().lower() for x in re.split(r'[\s,]', order_str) if x.strip()]
+
+        server_prefix = (
+            img_prefix or 
+            cls.config.get('image_server_url') or 
+            f"{F.SystemModelSetting.get('ddns')}/images"
+        ).rstrip('/')
+
+        for opt in parsed_order:
+            if opt == "google_fileid":
+                val = str(r_dict.get('google_fileid') or '').strip()
+                if val and val.lower() not in ['null', 'none', '403', '404', 'deprecated', 'unavailable']:
+                    return f"https://drive.google.com/thumbnail?id={val}"
+
+            elif opt == "local_img_path":
+                path_val = str(r_dict.get('local_img_path') or '').strip()
+                if path_val and path_val.lower() not in ['null', 'none', '403', '404', 'deprecated', 'unavailable']:
+                    if path_val.startswith('http://') or path_val.startswith('https://'):
+                        return path_val
+                    clean_rel = path_val.replace('\\', '/').lstrip('/')
+                    if clean_rel.startswith('images/'):
+                        clean_rel = clean_rel[len('images/'):]
+                    return f"{server_prefix}/{clean_rel}"
+
+            elif opt == "site_img_url":
+                val = str(r_dict.get('site_img_url') or '').strip()
+                if val and val.startswith('http') and val.lower() not in ['403', '404', 'deprecated', 'unavailable']:
+                    return val
+
+        return ""
 
 
     @classmethod
@@ -252,14 +371,27 @@ class SiteAvdbs(SiteAvBase):
                             img_url_raw = img_url_raw.replace('_ns.jpg', '_n.jpg')
                         
                         processed_thumb = cls.make_image_url(img_url_raw)
-                        
+
+                        final_actor_idx = f"PA{actor_idx}" if actor_idx else ""
+
+                        if cls.MetadataSetting and cls.MetadataSetting.get_bool("meta_db_use"):
+                            cls._auto_save_to_meta_person(
+                                name_kr=name_ko_raw,
+                                name_orig=name_ja_raw or originalname,
+                                name_en=name_en_raw,
+                                actor_idx=final_actor_idx,
+                                thumb=processed_thumb
+                            )
+
                         return {
-                            "name": name_ko_raw, 
-                            "name2": name_en_raw,
-                            "actor_idx": actor_idx,
+                            "name_org": name_ja_raw or originalname,
+                            "name_ko": name_ko_raw, 
+                            "name_en": name_en_raw,
+                            "actor_idx": final_actor_idx,
                             "site": "avdbs_web", 
                             "thumb": processed_thumb 
                         }
+
                 except Exception as e_item: 
                     logger.exception(f"AVDBS WEB: Error processing item at index {idx}: {e_item}")
 
@@ -273,6 +405,31 @@ class SiteAvdbs(SiteAvBase):
             session.close()
         
         return None
+
+
+    @classmethod
+    def _auto_save_to_meta_person(cls, name_kr, name_orig, name_en, actor_idx, thumb):
+        try:
+            from metadata.setup import P as MetadataP
+            meta_db_mod = MetadataP.get_module('meta_db')
+            if not meta_db_mod:
+                return
+
+            payload = {
+                'domain': 'JAV',
+                'name_org': name_orig,
+                'name_ko': name_kr,
+                'name_en': name_en or '',
+                'person_idx': actor_idx or '',
+                'thumb': thumb or '',
+                'aliases': [name_en] if name_en else [],
+                'person_type': 'actor'
+            }
+            meta_db_mod.person_save(payload)
+            logger.debug(f"AVDBS WEB ➔ MetaPerson 자동 저장 완료: {name_kr} ({name_orig})")
+
+        except Exception as e:
+            logger.debug(f"AVDBS WEB MetaPerson 자동 저장 실패: {e}")
 
 
     ################################################
@@ -319,15 +476,11 @@ class SiteAvdbs(SiteAvBase):
 
     @classmethod
     def _parse_name_variations(cls, originalname):
-        """입력된 이름에서 검색할 이름 변형 목록을 생성합니다."""
-        variations = {originalname}
-        match = re.match(r'^(.*?)\s*[（\(]([^）\)]+)[）\)]\s*$', originalname)
-        if match:
-            before_paren = match.group(1).strip(); inside_paren = match.group(2).strip()
-            if before_paren: variations.add(before_paren)
-            if inside_paren: variations.add(inside_paren)
-        # logger.debug(f"원본 이름 '{originalname}'에 대한 검색 변형 생성: {list(variations)}")
-        return list(variations)
+        """이름에서 임의로 괄호를 자르지 않고, 가공되지 않은 100% 원문 이름만을 반환합니다."""
+        if not originalname:
+            return []
+        clean_name = str(originalname).strip()
+        return [clean_name] if clean_name else []
 
 
     # endregion 유틸
@@ -340,11 +493,21 @@ class SiteAvdbs(SiteAvBase):
     @classmethod
     def set_config(cls, db):
         super().set_config(db)
+
+        # 설정된 배우 이미지 소스 모드에 따라 배포 DB 탐색 순서 자동 동기화 (기본값: gds)
+        jav_mode = db.get("jav_censored_actor_image_mode") or "gds"
+        if jav_mode == 'image_server':
+            auto_img_order = "local_img_path, google_fileid, site_img_url"
+        elif jav_mode == 'site':
+            auto_img_order = "site_img_url, google_fileid, local_img_path"
+        else:
+            auto_img_order = "google_fileid, local_img_path, site_img_url"
+
         cls.config.update({
             "use_local_db": db.get_bool("jav_censored_avdbs_use_local_db"),
-            "local_db_path": db.get("jav_censored_avdbs_local_db_path"),
             "image_url_prefix": (db.get("jav_actor_img_url_prefix") or "").rstrip('/'),
             "use_web_search": db.get_bool("jav_censored_avdbs_use_web_search"),
+            "actor_img_order": auto_img_order,
         })
 
         #logger.debug(res.text)

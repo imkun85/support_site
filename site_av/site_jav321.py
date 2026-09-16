@@ -7,7 +7,7 @@ from ..entity_av import EntityAVSearch
 from ..entity_base import EntityActor, EntityExtra, EntityMovie, EntityRatings, EntityThumb
 from ..setup import P, logger
 from .site_av_base import SiteAvBase
-from ..constants import AV_GENRE_IGNORE_JA, AV_GENRE, AV_GENRE_IGNORE_KO
+from ..constants import AV_STUDIO, AV_GENRE_IGNORE_JA, AV_GENRE, AV_GENRE_IGNORE_KO
 
 SITE_BASE_URL = "https://www.jav321.com"
 
@@ -150,12 +150,20 @@ class SiteJav321(SiteAvBase):
     # region INFO
 
     @classmethod
-    def info(cls, code, keyword=None, fp_meta_mode=False, skip_trans=False, is_validating=False, is_rescued=False):
+    def info(cls, code, keyword=None, extra_opts=None, **kwargs):
+        opts = dict(extra_opts or {})
+        opts.update(kwargs)
+
         ret = {}
-        entity_result_val_final = None
         try:
-            entity_result_val_final = cls.__info(code, keyword=keyword, fp_meta_mode=fp_meta_mode, skip_trans=skip_trans, is_validating=is_validating, is_rescued=is_rescued).as_dict()
-            if entity_result_val_final:
+            entity_obj = cls.__info(code, keyword=keyword, extra_opts=opts)
+            if entity_obj:
+                entity_result_val_final = entity_obj.as_dict()
+                if hasattr(entity_obj, 'original') and entity_obj.original:
+                    entity_result_val_final['original'] = entity_obj.original
+                if hasattr(entity_obj, 'extra_info') and entity_obj.extra_info:
+                    entity_result_val_final['extra_info'] = entity_obj.extra_info
+
                 ret["ret"] = "success"
                 ret["data"] = entity_result_val_final
             else:
@@ -169,9 +177,17 @@ class SiteJav321(SiteAvBase):
 
 
     @classmethod
-    def __info(cls, code, keyword=None, fp_meta_mode=False, skip_trans=False, is_validating=False, is_rescued=False):
+    def __info(cls, code, keyword=None, extra_opts=None, **kwargs):
+        opts = dict(extra_opts or {})
+        opts.update(kwargs)
+
+        skip_trans = opts.get('skip_trans', False)
+        is_validating = opts.get('is_validating', False)
+        is_rescued = opts.get('is_rescued', False)
+
         url_pid = code[2:]
         url = f"{SITE_BASE_URL}/video/{url_pid}"
+
         tree = None
         try:
             tree = cls.get_tree(url)
@@ -186,6 +202,7 @@ class SiteJav321(SiteAvBase):
         entity.country = ["일본"]; entity.mpaa = "청소년 관람불가"
         entity.thumb = []; entity.fanart = []; entity.extras = []; entity.ratings = []
         entity.original = {}
+        entity.extra_info['info_url'] = url
         ui_code_for_image = ""
         mgs_special_poster_filepath = None
         trusted_ui_code_from_keyword = None
@@ -248,20 +265,30 @@ class SiteJav321(SiteAvBase):
                     elif current_key == "出演者":
                         if entity.actor is None: entity.actor = []
                         actor_a_tags = b_tag_key_node.xpath("./following-sibling::a[contains(@href, '/star/')]")
-                        temp_actor_names = set()
                         for actor_link in actor_a_tags:
                             actor_name_cleaned = cls._clean_value(actor_link.text_content().strip())
-                            if actor_name_cleaned: temp_actor_names.add(actor_name_cleaned)
-                        for name_item in temp_actor_names:
-                            if not any(ea_item.name == name_item for ea_item in entity.actor):
-                                entity.actor.append(EntityActor(name_item))
+                            if not actor_name_cleaned:
+                                continue
+                            if not any((ea_item.name_ko or ea_item.name_org) == actor_name_cleaned for ea_item in entity.actor):
+                                act_obj = EntityActor(actor_name_cleaned)
+                                href = actor_link.attrib.get('href', '').strip()
+                                star_match = re.search(r'/star/([^/?]+)', href)
+                                if star_match:
+                                    s_id = star_match.group(1).strip()
+                                    full_321_url = href if href.startswith('http') else f"{SITE_BASE_URL}{href}"
+                                    act_obj.extra_info = {
+                                        'site_actor_id': s_id,
+                                        'site_actor_url': full_321_url
+                                    }
+                                entity.actor.append(act_obj)
+
                     elif current_key == "メーカー":
                         studio_name_raw = (b_tag_key_node.xpath("./following-sibling::a[1][contains(@href, '/company/')]/text()") or [""])[0]
                         if not studio_name_raw: studio_name_raw = (b_tag_key_node.xpath("./following-sibling::text()[1][normalize-space()]") or [""])[0]
                         cleaned_studio_name = cls._clean_value(studio_name_raw)
                         if cleaned_studio_name:
                             entity.original['studio'] = cleaned_studio_name
-                            entity.studio = cls.trans(cleaned_studio_name)
+                            entity.studio = AV_STUDIO.get(cleaned_studio_name, cleaned_studio_name)
                     elif current_key == "ジャンル":
                         if entity.genre is None: entity.genre = []
                         if 'genre' not in entity.original: 
@@ -272,13 +299,11 @@ class SiteJav321(SiteAvBase):
                             genre_ja_cleaned = cls._clean_value(genre_link.text_content().strip())
                             if not genre_ja_cleaned or genre_ja_cleaned in AV_GENRE_IGNORE_JA: continue
                             entity.original['genre'].append(genre_ja_cleaned)
-                            if genre_ja_cleaned in AV_GENRE: 
-                                temp_genre_list.append(AV_GENRE[genre_ja_cleaned])
-                            else:
-                                genre_ko_item = cls.trans(genre_ja_cleaned).replace(" ", "")
-                                if genre_ko_item not in AV_GENRE_IGNORE_KO: 
-                                    temp_genre_list.append(genre_ko_item)
+                            trans_genre = cls.get_translated_tag(genre_ja_cleaned)
+                            if trans_genre and trans_genre not in AV_GENRE_IGNORE_KO and trans_genre not in temp_genre_list:
+                                temp_genre_list.append(trans_genre)
                         if temp_genre_list: entity.genre = list(set(temp_genre_list))
+
                     elif current_key == "配信開始日":
                         date_val_cleaned = cls._clean_value((b_tag_key_node.xpath("./following-sibling::text()[1][normalize-space()]") or [""])[0])
                         if date_val_cleaned: 
@@ -322,6 +347,7 @@ class SiteJav321(SiteAvBase):
                 if raw_h3_title_text.upper().startswith(entity.ui_code.upper()):
                     tagline_candidate_text = raw_h3_title_text[len(entity.ui_code):].strip()
                 cleaned_tagline = cls.A_P(cls._clean_value(tagline_candidate_text))
+                entity.original['title'] = entity.originaltitle
                 entity.original['tagline'] = cleaned_tagline
                 if skip_trans:
                     entity.tagline = cleaned_tagline
@@ -329,25 +355,32 @@ class SiteJav321(SiteAvBase):
                     entity.tagline = cls.trans_by_llm(cleaned_tagline)
 
             if not entity.tagline and entity.title: entity.tagline = entity.title
-            if not entity.plot and entity.tagline: entity.plot = entity.tagline 
 
-            # === 3. 이미지 처리 위임 ===
+            # 이미지 처리 위임
             ps_url_from_search_cache = cls._ps_url_cache.get(code)
 
             try:
                 raw_image_urls = cls.__img_urls(tree)
-                entity = cls.process_image_data(entity, raw_image_urls, ps_url_from_search_cache, is_validating=is_validating, is_rescued=is_rescued)
+                entity = cls.process_image_data(entity, raw_image_urls, ps_url_from_search_cache, extra_opts=opts)
 
             except Exception as e:
                 logger.exception(f"Jav321: Error during image processing delegation for {code}: {e}")
 
-            # === 4. 예고편 및 Shiroutoname 보정 처리 ===
+            # 예고편 및 Shiroutoname 보정 처리
             if cls.config['use_extras']:
                 try: 
                     trailer_xpath = '//*[@id="vjs_sample_player"]/source/@src'
                     trailer_tags = tree.xpath(trailer_xpath)
                     if trailer_tags and trailer_tags[0].strip().startswith("http"):
-                        url = cls.make_video_url(trailer_tags[0].strip())
+                        raw_trailer_url = trailer_tags[0].strip()
+                        if not hasattr(entity, 'original') or entity.original is None:
+                            entity.original = {}
+                        entity.original['extras'] = [{
+                            'content_url': raw_trailer_url,
+                            'content_type': 'trailer'
+                        }]
+
+                        url = cls.make_video_url(raw_trailer_url)
                         if url:
                             entity.extras.append(EntityExtra("trailer", entity.tagline or entity.ui_code, "mp4", url))
                 except Exception as e_trailer: logger.exception(f"Jav321: Error processing trailer for {code}: {e_trailer}")
@@ -397,7 +430,7 @@ class SiteJav321(SiteAvBase):
             return None
 
         finally:
-            # === 6. 임시 파일 정리 ===
+            # 임시 파일 정리
             if mgs_special_poster_filepath and os.path.exists(mgs_special_poster_filepath):
                 try:
                     os.remove(mgs_special_poster_filepath)
@@ -629,4 +662,3 @@ class SiteJav321(SiteAvBase):
 
     # endregion SiteAvBase 메서드 오버라이드
     ################################################
-
